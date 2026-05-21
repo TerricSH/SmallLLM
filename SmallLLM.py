@@ -15,7 +15,8 @@ class SmallLLMConfig:
         layer_count: int = 16,
         dim: int = 512,
         hidden_dim: int = 2048,
-        attention_dropout: float = 0.01,
+        max_seq_len: int = 2048,
+        attention_dropout: float = 0.0,
         norm_eps: float = 1e-6,
         vocab_size: int = 32000,
     ):
@@ -23,6 +24,7 @@ class SmallLLMConfig:
         self.layer_count = layer_count
         self.dim = dim
         self.hidden_dim = hidden_dim
+        self.max_seq_len = max_seq_len
         self.attention_dropout = attention_dropout
         self.norm_eps = norm_eps
         self.vocab_size = vocab_size
@@ -30,7 +32,7 @@ class SmallLLMConfig:
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        self.eps = eps # 防止开负号
+        self.eps = eps # 防止除以零
         self.weight = nn.Parameter(torch.ones(dim)) # 可训练矩阵，增加差别的表达（权重）
     
     def _norml(self, x: torch.Tensor) -> torch.Tensor:
@@ -40,7 +42,7 @@ class RMSNorm(nn.Module):
         retVal = self._norml(x.float()).type_as(x) 
         return retVal * self.weight 
 
-def precompute_rope_frequencies( dim: int, seq_length: int, theta: float = 10000, device: Optional[torch.device] = None):
+def precompute_rope_frequencies(dim: int, seq_length: int, theta: float = 10000, device: Optional[torch.device] = None):
     # 角速度
     omiga = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim))
     # 位置 矩阵
@@ -48,7 +50,7 @@ def precompute_rope_frequencies( dim: int, seq_length: int, theta: float = 10000
     # 获得角度频率 
     freqs = torch.outer(t, omiga)
     # 返回freqs
-    return torch.polar(torch.ones_like(freqs),freqs)
+    return torch.polar(torch.ones_like(freqs), freqs)
 
 def reshape_for_broadcast(freqs_cis:torch.Tensor, xq: torch.Tensor) -> torch.Tensor:
     # 改一下形状， 把freqs的结构里加两列，匹配xq形状
@@ -81,6 +83,7 @@ class SmallLLM(nn.Module):
         ])
         self.final_norm = RMSNorm(config.dim, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
+        self.lm_head.weight = self.tok_embeddings.weight  # 权重绑定
 
     def forward(self, x: torch.Tensor, targets: Optional[torch.Tensor] = None):
         if x.dtype in (torch.int8, torch.int16, torch.int32, torch.int64):
@@ -132,10 +135,16 @@ class MHA(nn.Module):
         self.wv = nn.Linear(config.dim, config.dim, bias=False)
         self.wo = nn.Linear(config.dim, config.dim, bias=False)
         self.attention_dropout = config.attention_dropout
+        self.freqs_cis: torch.Tensor
+        self.register_buffer(
+            "freqs_cis",
+            precompute_rope_frequencies(self.head_dim, config.max_seq_len),
+            persistent=False,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_length, _ = x.shape
-        freqs_cis = precompute_rope_frequencies(self.head_dim, seq_length, theta=10000, device=x.device)
+        freqs_cis = self.freqs_cis[:seq_length]
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         xq = xq.view(batch_size, seq_length, self.head_count , self.head_dim)
         xk = xk.view(batch_size, seq_length, self.head_count , self.head_dim)
@@ -169,6 +178,7 @@ class FFN(nn.Module):
     def __init__(self, dim: int, hidden_dim: int, multiplier: Optional[float]):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
+        hidden_dim = 256 * ((hidden_dim + 255) // 256)  # 对齐到 256 的倍数，提升 GPU 效率
         if multiplier is not None:
             hidden_dim = int(multiplier * hidden_dim)
         self.w_gate = nn.Linear(dim, hidden_dim, bias=False)
@@ -176,4 +186,4 @@ class FFN(nn.Module):
         self.w_down =  nn.Linear(hidden_dim, dim, bias=False)
     def forward(self, x ):
         # SwiGLU 
-        return self.w_down(nn.functional.silu(self.w_gate(x)) * self.w_up(x)).type_as(x)
+        return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x)).type_as(x)
