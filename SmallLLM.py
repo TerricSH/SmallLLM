@@ -19,6 +19,7 @@ class SmallLLMConfig:
         attention_dropout: float = 0.0,
         norm_eps: float = 1e-6,
         vocab_size: int = 32000,
+        gradient_checkpointing: bool = False,
     ):
         self.head_count = head_count
         self.layer_count = layer_count
@@ -27,6 +28,7 @@ class SmallLLMConfig:
         self.max_seq_len = max_seq_len
         self.attention_dropout = attention_dropout
         self.norm_eps = norm_eps
+        self.gradient_checkpointing = gradient_checkpointing
         self.vocab_size = vocab_size
 
 class RMSNorm(nn.Module):
@@ -94,7 +96,10 @@ class SmallLLM(nn.Module):
             raise ValueError("Expected token ids [B, L] or hidden states [B, L, dim]")
 
         for layer in self.layers:
-            hidden_states = layer(hidden_states)
+            if self.config.gradient_checkpointing and self.training:
+                hidden_states = torch.utils.checkpoint.checkpoint(layer, hidden_states, use_reentrant=False)
+            else:
+                hidden_states = layer(hidden_states)
 
         hidden_states = self.final_norm(hidden_states)
         logits = self.lm_head(hidden_states)
@@ -177,7 +182,7 @@ class MHA(nn.Module):
 class FFN(nn.Module):
     def __init__(self, dim: int, hidden_dim: int, multiplier: Optional[float]):
         super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
+        
         hidden_dim = 256 * ((hidden_dim + 255) // 256)  # 对齐到 256 的倍数，提升 GPU 效率
         if multiplier is not None:
             hidden_dim = int(multiplier * hidden_dim)
