@@ -181,7 +181,7 @@ class MHA(nn.Module):
         if self.attention_dropout > 0.0 and self.training:
             scores = F.dropout(scores, p=self.attention_dropout)
         
-        x = torch.matmul(scores, xv)
+        x = torch.matmul(scores.float(), xv.float()).type_as(xv)
         x = x.transpose(1, 2).contiguous().view(batch_size, seq_length, self.head_count * self.head_dim)
         return self.wo(x)
 
@@ -196,6 +196,6 @@ class FFN(nn.Module):
         self.w_gate = nn.Linear(dim, hidden_dim, bias=False)
         self.w_up =  nn.Linear(dim, hidden_dim, bias=False)
         self.w_down =  nn.Linear(hidden_dim, dim, bias=False)
-    def forward(self, x ):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # SwiGLU 
-        return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x)).type_as(x)
+        return self.w_down(F.silu(self.w_gate(x.float())) * self.w_up(x.float())).type_as(x)
