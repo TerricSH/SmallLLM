@@ -108,7 +108,7 @@ class SmallLLM(nn.Module):
             return logits
 
         loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
+            logits.float().reshape(-1, logits.size(-1)),
             targets.reshape(-1),
             ignore_index=-100,
         )
@@ -161,15 +161,22 @@ class MHA(nn.Module):
         xk = xk.transpose(1, 2) 
         xv = xv.transpose(1, 2) 
         # 计算注意力分数
-        scores = torch.matmul(xq, xk.transpose(2,3)) / math.sqrt(self.head_dim)
+        scores = torch.matmul(
+            xq.float(), xk.float().transpose(2, 3)
+        ) / math.sqrt(self.head_dim)
 
         causal_mask = torch.triu(
-            torch.full((seq_length, seq_length), float("-inf"), device=x.device, dtype=scores.dtype),
+            torch.full(
+                (seq_length, seq_length),
+                float("-inf"),
+                device=x.device,
+                dtype=torch.float32,
+            ),
             diagonal=1,
         )
 
         scores = scores + causal_mask 
-        scores = F.softmax(scores.float(), dim=-1).type_as(x)
+        scores = F.softmax(scores, dim=-1).type_as(xv)
 
         if self.attention_dropout > 0.0 and self.training:
             scores = F.dropout(scores, p=self.attention_dropout)
